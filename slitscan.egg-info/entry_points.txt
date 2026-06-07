@@ -1,0 +1,2 @@
+[console_scripts]
+slitscan = slitscan.cli:app
