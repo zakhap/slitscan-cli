@@ -39,6 +39,9 @@ slitscan render INPUT OUTPUT [options]
 | `--axis` | `x` | Scan axis: `x` (columns) or `y` (rows) |
 | `--max-delay N` | width−1 | Frames between vanguard and lagging edge |
 | `--slice-width N` | `1` | Pixels per temporal band |
+| `--grid COLSxROWS` | — | Grid mode: 2D mosaic, each cell frozen at a different time (see below) |
+| `--grid-combine` | `avg` | Grid: how `--profile` combines across axes: `avg`, `max`, `min`, `multiply` |
+| `--grid-mod PATCH` | — | Grid: spatial LFO for cell time, repeatable (see below) |
 | `--fill` | `black` | Out-of-range fill: `black`, `white`, `transparent`, `hold`, `wrap` |
 | `--vanguard 0–1` | profile default | Position of the zero-delay edge |
 | `--interpolate` | off | Sub-frame linear interpolation |
@@ -91,6 +94,49 @@ slitscan info input.mp4 --json
 **tent** — delay peaks at center and falls to zero at both edges. Creates a bilateral temporal fold.
 
 **reverse** — mirror of ramp; the opposite edge leads in time.
+
+## Grid mode
+
+Standard slit-scan slices the frame into 1D bands along one axis. **Grid mode**
+splits it into a `COLS×ROWS` mosaic where every *cell* reads from its own source
+frame — `source(cell, t) = t − delay[row, col]` — so each tile is frozen at a
+different moment, and the whole mosaic animates as the clip plays. At `Nx1` it
+reduces to vertical bands, at `1xN` to horizontal bands.
+
+```sh
+# 8×8 mosaic; cell time from the ramp profile, averaged across both axes
+# (a diagonal time gradient). wrap keeps every tile showing real footage.
+slitscan render input.mp4 out.mp4 --grid 8x8 --fill wrap
+
+# Radial time field: tent profile, max-combined → center "now", corners oldest
+slitscan render input.mp4 out.mp4 --grid 8x8 --profile tent --grid-combine max --fill wrap
+```
+
+Where each cell's time comes from:
+
+- **Profiles (default).** The `--profile` (`ramp`/`tent`/`reverse`) is evaluated
+  across the columns and the rows and combined with `--grid-combine`
+  (`avg`/`max`/`min`/`multiply`).
+- **Spatial LFOs** (`--grid-mod`, repeatable). A modulation field whose phase is
+  driven by the cell's grid position. Format mirrors `--mod` but the destination
+  is a grid axis: `axis=osc:rate=<r>,depth=<d>[,phase=<p>][,offset=<o>]`, where
+  `axis` is `col` or `row` and `rate` is cycles across that axis. Contributions
+  sum, then scale to `--max-delay`.
+
+```sh
+# Vertical stripes of oscillating time (one sine across the columns)
+slitscan render input.mp4 out.mp4 --grid 12x12 --grid-mod "col=sine:rate=2,depth=1" --fill wrap
+
+# Plaid: a sine on each axis sums into a 2D interference field of times
+slitscan render input.mp4 out.mp4 --grid 12x12 \
+  --grid-mod "col=sine:rate=2,depth=0.5" \
+  --grid-mod "row=sine:rate=2,depth=0.5" --fill wrap
+```
+
+Grid mode uses the full buffer (cells need random access to any frame), so it is
+incompatible with `--buffer=ring`. Worked examples and a script to generate a
+demo clip live in `examples/` (`python examples/make_source_clip.py`, then see
+`examples/grid/README.md`).
 
 ## Modulation
 

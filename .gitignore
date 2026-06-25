@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+build/
+dist/
+
+# macOS
+.DS_Store
+
+# Swift / SwiftPM build artifacts (slitscan-studio app)
+slitscan-studio/.build/
+slitscan-studio/**/*.xcodeproj/xcuserdata/
+DerivedData/
+
+# Generated example media — reproducible via examples/make_source_clip.py
+# and the commands in examples/grid/README.md
+examples/source.mp4
+examples/grid/*.mp4

@@ -60,6 +60,33 @@ def render(
         min=1,
     ),
 
+    # Grid mode (2D mosaic slit-scan)
+    grid: str | None = typer.Option(
+        None,
+        "--grid",
+        help=(
+            "Grid mode: split the frame into COLSxROWS cells, each frozen at a "
+            "different time. E.g. --grid 8x6. Replaces 1D bands with a 2D "
+            "mosaic. Time per cell comes from --profile (combined across axes "
+            "via --grid-combine) unless --grid-mod is given."
+        ),
+    ),
+    grid_combine: str = typer.Option(
+        "avg",
+        "--grid-combine",
+        help="How the profile combines across grid axes: avg | max | min | multiply.",
+    ),
+    grid_mod: list[str] = typer.Option(
+        [],
+        "--grid-mod",
+        help=(
+            "Spatial LFO for grid cell time (repeatable). Format: "
+            "axis=osc:rate=<r>,depth=<d>[,phase=<p>][,offset=<o>], axis=col|row. "
+            "Example: --grid-mod col=sine:rate=2,depth=1. Presence switches the "
+            "grid's delay source from --profile to the summed LFO field."
+        ),
+    ),
+
     # Fill
     fill: str = typer.Option(
         "black",
@@ -156,6 +183,32 @@ def render(
     except ValueError as e:
         raise typer.BadParameter(str(e))
 
+    # --- Grid mode parsing/validation ---
+    grid_dims: tuple[int, int] | None = None
+    grid_lfos = []
+    if grid is not None:
+        try:
+            cols_str, rows_str = grid.lower().split("x")
+            grid_cols, grid_rows = int(cols_str), int(rows_str)
+        except ValueError:
+            raise typer.BadParameter(
+                f"--grid must be COLSxROWS (e.g. 8x6), got {grid!r}"
+            )
+        if grid_cols < 1 or grid_rows < 1:
+            raise typer.BadParameter("--grid COLS and ROWS must be >= 1")
+        grid_dims = (grid_cols, grid_rows)
+        if grid_combine not in ("avg", "max", "min", "multiply"):
+            raise typer.BadParameter(
+                f"--grid-combine must be avg|max|min|multiply, got {grid_combine!r}"
+            )
+        from slitscan.engine.grid import parse_grid_lfo
+        try:
+            grid_lfos = [parse_grid_lfo(s) for s in grid_mod]
+        except ValueError as e:
+            raise typer.BadParameter(str(e))
+    elif grid_mod:
+        raise typer.BadParameter("--grid-mod requires --grid to be set.")
+
     # --- Validate flags that are not yet implemented ---
     if fit not in ("crop",):
         _not_implemented(f"--fit={fit}", phase=2)
@@ -213,7 +266,16 @@ def render(
     else:
         budget_bytes = 8 * 1024 ** 3  # 8 GB default
 
-    if buffer == "full":
+    if grid_dims is not None:
+        # Grid cells may read any frame in the clip (like fill=wrap), which a
+        # ring window cannot serve. Grid mode always uses the full buffer.
+        if buffer == "ring":
+            typer.echo("Error: grid mode is incompatible with --buffer=ring "
+                       "(cells need random access). Use --buffer=full or auto.",
+                       err=True)
+            raise typer.Exit(code=1)
+        use_ring = False
+    elif buffer == "full":
         use_ring = False
     elif buffer == "ring":
         use_ring = True
@@ -273,6 +335,60 @@ def render(
         height=target_h,
         channels=meta.channels,
     )
+
+    # --- Grid mode: build the static per-cell delay grid and render ---
+    if grid_dims is not None:
+        from slitscan.engine.grid import (
+            profile_delay_grid, lfo_delay_grid, render_grid)
+
+        grid_cols, grid_rows = grid_dims
+        # Cells reference frames, so the natural max delay is the clip length.
+        grid_max_delay = max_delay if max_delay is not None else actual_meta.frame_count - 1
+
+        if grid_lfos:
+            delay_grid = lfo_delay_grid(
+                grid_lfos, cols=grid_cols, rows=grid_rows, max_delay=grid_max_delay)
+            source_label = f"lfo×{len(grid_lfos)}"
+        else:
+            delay_grid = profile_delay_grid(
+                profile, cols=grid_cols, rows=grid_rows, max_delay=grid_max_delay,
+                vanguard=vanguard if vanguard is not None else (0.5 if profile == "tent" else 0.0),
+                combine=grid_combine)
+            source_label = f"{profile}/{grid_combine}"
+
+        if not quiet:
+            from slitscan.io.encode import codec_name_for_path
+            typer.echo("─" * 50)
+            typer.echo("Render plan (grid mode)")
+            typer.echo("─" * 50)
+            typer.echo(f"  Input:        {actual_meta.width}×{actual_meta.height}  "
+                       f"{actual_meta.fps:.3f} fps  {actual_meta.frame_count} frames")
+            typer.echo(f"  Grid:         {grid_cols}×{grid_rows} cells  "
+                       f"({grid_cols * grid_rows} tiles)")
+            typer.echo(f"  Delay source: {source_label}  max_delay={grid_max_delay}")
+            typer.echo(f"  Fill:         {fill}   interpolate={interpolate}")
+            typer.echo(f"  Codec:        {codec_name_for_path(output)}  →  {output.name}")
+            typer.echo("─" * 50)
+
+        try:
+            encoder = open_encoder(
+                path=str(output), width=actual_meta.width, height=actual_meta.height,
+                fps=actual_meta.fps, fill=fill)
+        except Exception as exc:
+            typer.echo(f"Error opening encoder: {exc}", err=True)
+            raise typer.Exit(code=1)
+
+        if not quiet:
+            typer.echo(f"Rendering {actual_meta.frame_count} frames…")
+        try:
+            render_grid(meta=actual_meta, buffer=buf, delay_grid=delay_grid,
+                        fill=fill, interpolate=interpolate, encoder=encoder)
+        except Exception as exc:
+            typer.echo(f"Render error: {exc}", err=True)
+            raise typer.Exit(code=1)
+        if not quiet:
+            typer.echo(f"Done → {output}")
+        return
 
     # --- Print plan ---
     if not quiet:
